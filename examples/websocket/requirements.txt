@@ -1,0 +1,7 @@
+# WebSocket support
+websockets>=11.0
+
+# Image processing (already in StreamDiffusion requirements)
+# Pillow is already included in the main project
+
+# Base StreamDiffusion requirements are in the root requirements.txt
