@@ -20,9 +20,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 from utils.viewer import receive_images
 from utils.wrapper import StreamDiffusionWrapper
 
-# Global variables for image buffer
+# Global variables for image buffer and prompt updates
 inputs = []
 inputs_lock = threading.Lock()
+prompt_queue = Queue()  # Queue for thread-safe prompt updates
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -167,6 +168,28 @@ async def websocket_server(port: int, width: int, height: int):
                             "timestamp": time.time()
                         }))
 
+                    elif message_type == "prompt_update":
+                        # Handle prompt update request
+                        new_prompt = data.get("prompt")
+                        if new_prompt:
+                            prompt_queue.put(new_prompt)
+                            logger.info(f"Prompt update queued: {new_prompt[:50]}...")
+
+                            # Send acknowledgment
+                            await websocket.send(json.dumps({
+                                "type": "prompt_updated",
+                                "status": "queued",
+                                "prompt": new_prompt,
+                                "timestamp": time.time()
+                            }))
+                        else:
+                            logger.warning("Prompt update message missing 'prompt' field")
+                            await websocket.send(json.dumps({
+                                "type": "error",
+                                "message": "Missing 'prompt' field",
+                                "timestamp": time.time()
+                            }))
+
                     elif message_type == "register":
                         # Accept any registration
                         client_type = data.get("client_type", "producer")
@@ -281,7 +304,7 @@ def image_generation_process(
         WebSocket server port.
     """
 
-    global inputs, inputs_lock
+    global inputs, inputs_lock, prompt_queue
 
     # Initialize StreamDiffusion
     stream = StreamDiffusionWrapper(
@@ -326,6 +349,16 @@ def image_generation_process(
         try:
             if not close_queue.empty():
                 break
+
+            # Check for prompt updates before processing
+            if not prompt_queue.empty():
+                new_prompt = prompt_queue.get()
+                try:
+                    # Use update_prompt for fast, lightweight prompt change
+                    stream.stream.update_prompt(new_prompt)
+                    logger.info(f"Prompt updated to: {new_prompt[:50]}...")
+                except Exception as e:
+                    logger.error(f"Failed to update prompt: {e}")
 
             with inputs_lock:
                 if len(inputs) < frame_buffer_size:

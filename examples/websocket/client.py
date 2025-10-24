@@ -102,6 +102,42 @@ async def send_image(websocket, image: PIL.Image.Image, format: str = "JPEG"):
         logger.error(f"Error receiving acknowledgment: {e}")
 
 
+async def send_prompt_update(websocket, prompt: str):
+    """
+    Send a prompt update message through WebSocket.
+
+    Parameters
+    ----------
+    websocket : websockets.WebSocketClientProtocol
+        WebSocket connection
+    prompt : str
+        New prompt text
+    """
+    # Create message
+    message = json.dumps({
+        "type": "prompt_update",
+        "prompt": prompt,
+        "timestamp": time.time()
+    })
+
+    # Send message
+    await websocket.send(message)
+    logger.info(f"Sent prompt update: {prompt[:50]}...")
+
+    # Wait for acknowledgment
+    try:
+        response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+        response_data = json.loads(response)
+        if response_data.get("type") == "prompt_updated":
+            logger.info(f"Prompt update confirmed: {response_data.get('status')}")
+        elif response_data.get("type") == "error":
+            logger.error(f"Prompt update error: {response_data.get('message')}")
+    except asyncio.TimeoutError:
+        logger.warning("No acknowledgment received for prompt update")
+    except Exception as e:
+        logger.error(f"Error receiving prompt update acknowledgment: {e}")
+
+
 async def stream_static_image(
     websocket_uri: str,
     image_path: str,
@@ -368,6 +404,125 @@ async def stream_webcam(
     return
 
 
+async def stream_with_prompt_interactive(
+    websocket_uri: str,
+    image_path: str,
+    fps: float = 10.0,
+    format: str = "JPEG"
+):
+    """
+    Stream images with interactive prompt updates.
+
+    Parameters
+    ----------
+    websocket_uri : str
+        WebSocket server URI
+    image_path : str
+        Path to image file
+    fps : float
+        Frames per second to send
+    format : str
+        Image format (JPEG or PNG)
+    """
+    import asyncio
+
+    # Load image
+    image = PIL.Image.open(image_path)
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    logger.info(f"Loaded image: {image_path} ({image.size})")
+
+    # Connect to WebSocket
+    async with websockets.connect(websocket_uri) as websocket:
+        logger.info(f"Connected to {websocket_uri}")
+
+        # Register as producer
+        await websocket.send(json.dumps({
+            "type": "register",
+            "client_type": "producer"
+        }))
+        logger.debug("Registered as producer")
+
+        # Wait for registration confirmation
+        try:
+            response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+            response_data = json.loads(response)
+            logger.debug(f"Registration response: {response_data.get('type')}")
+        except asyncio.TimeoutError:
+            logger.warning("No registration confirmation received")
+
+        logger.info("\nInteractive Prompt Mode")
+        logger.info("=" * 50)
+        logger.info("Enter prompts to update the generation style.")
+        logger.info("Type 'quit' or 'exit' to stop.")
+        logger.info("Press Ctrl+C to force quit.")
+        logger.info("=" * 50 + "\n")
+
+        # Create tasks for image sending and prompt input
+        interval = 1.0 / fps
+
+        async def send_images():
+            """Continuously send images"""
+            while True:
+                try:
+                    await send_image(websocket, image, format)
+                    logger.debug(f"Sent image")
+                    await asyncio.sleep(interval)
+                except Exception as e:
+                    logger.error(f"Error sending image: {e}")
+                    break
+
+        async def handle_prompts():
+            """Handle prompt input from user"""
+            loop = asyncio.get_event_loop()
+
+            while True:
+                try:
+                    # Use run_in_executor to make input() non-blocking
+                    prompt = await loop.run_in_executor(
+                        None,
+                        input,
+                        "\nEnter new prompt (or 'quit' to exit): "
+                    )
+
+                    if prompt.lower() in ['quit', 'exit']:
+                        logger.info("Exiting interactive mode...")
+                        return
+
+                    if prompt.strip():
+                        await send_prompt_update(websocket, prompt)
+                    else:
+                        logger.warning("Empty prompt ignored")
+
+                except EOFError:
+                    logger.info("Input stream ended")
+                    return
+                except Exception as e:
+                    logger.error(f"Error handling prompt: {e}")
+                    return
+
+        # Run both tasks concurrently
+        try:
+            image_task = asyncio.create_task(send_images())
+            prompt_task = asyncio.create_task(handle_prompts())
+
+            # Wait for prompt task to complete (user quits)
+            await prompt_task
+
+            # Cancel image sending
+            image_task.cancel()
+            try:
+                await image_task
+            except asyncio.CancelledError:
+                pass
+
+        except KeyboardInterrupt:
+            logger.info("\nInterrupted by user")
+        except Exception as e:
+            logger.error(f"Error in interactive mode: {e}")
+
+
 def main(
     mode: str = "static",
     websocket_uri: str = "ws://localhost:8765",
@@ -386,11 +541,11 @@ def main(
     Parameters
     ----------
     mode : str
-        Streaming mode: static, directory, or screen
+        Streaming mode: static, directory, screen, or prompt-interactive
     websocket_uri : str
         WebSocket server URI
     source : str
-        Source path for static/directory modes
+        Source path for static/directory/prompt-interactive modes
     fps : float
         Frames per second to send
     duration : float
@@ -419,6 +574,9 @@ def main(
 
     # Stream specific screen region
     python client.py --mode=screen --region=[100,100,512,512]
+
+    # Interactive prompt mode
+    python client.py --mode=prompt-interactive --source=image.jpg
     """
 
     if mode == "static":
@@ -447,9 +605,17 @@ def main(
             websocket_uri, camera_index, fps, duration, format
         ))
 
+    elif mode == "prompt-interactive":
+        if not source:
+            logger.error("Source image path required for prompt-interactive mode")
+            return
+        asyncio.run(stream_with_prompt_interactive(
+            websocket_uri, source, fps, format
+        ))
+
     else:
         logger.error(f"Unknown mode: {mode}")
-        logger.info("Available modes: static, directory, screen")
+        logger.info("Available modes: static, directory, screen, prompt-interactive")
 
 
 if __name__ == "__main__":

@@ -68,6 +68,9 @@ python client.py --mode=screen
 
 # Stream webcam (if available)
 python client.py --mode=webcam
+
+# Interactive prompt update mode
+python client.py --mode=prompt-interactive --source=path/to/image.jpg
 ```
 
 ### Alternative: Start Server on Different Host/Port
@@ -142,11 +145,30 @@ The WebSocket communication uses JSON messages with the following format:
 }
 ```
 
+### Prompt Update Message (Client → Server)
+```json
+{
+    "type": "prompt_update",
+    "prompt": "new positive prompt text",
+    "timestamp": 1234567890.123
+}
+```
+
 ### Acknowledgment (Server → Client)
 ```json
 {
     "type": "ack",
     "status": "received"
+}
+```
+
+### Prompt Update Confirmation (Server → Client)
+```json
+{
+    "type": "prompt_updated",
+    "status": "queued",
+    "prompt": "new positive prompt text",
+    "timestamp": 1234567890.123
 }
 ```
 
@@ -216,6 +238,47 @@ The example uses a 3-component architecture with multi-process support:
    - Reduce `frame_buffer_size`
    - Use smaller image dimensions
 
+## Dynamic Prompt Updates
+
+The WebSocket implementation supports dynamic prompt updates during runtime, allowing you to change the generation style without restarting the server.
+
+### Interactive Prompt Mode
+
+Use the interactive prompt mode to change prompts in real-time while streaming images:
+
+```bash
+# Start the server
+python main.py
+
+# In another terminal, start interactive client
+python client.py --mode=prompt-interactive --source=image.jpg
+```
+
+When in interactive mode:
+- The client continuously streams the specified image
+- You can enter new prompts at any time
+- The prompt updates are sent via WebSocket and applied immediately
+- Type 'quit' or 'exit' to stop
+
+Example interaction:
+```
+Enter new prompt (or 'quit' to exit): anime style, masterpiece
+Prompt update confirmed: queued
+
+Enter new prompt (or 'quit' to exit): oil painting style
+Prompt update confirmed: queued
+
+Enter new prompt (or 'quit' to exit): cyberpunk neon style
+Prompt update confirmed: queued
+```
+
+### Technical Details
+
+- Uses `StreamDiffusion.update_prompt()` method for fast updates
+- Prompt updates are queued to ensure thread safety
+- Updates are applied between image batches to avoid corruption
+- Only positive prompts can be updated (negative prompts require full re-initialization)
+
 ## Extending the Example
 
 You can extend this example to:
@@ -225,6 +288,8 @@ You can extend this example to:
 3. **Support multiple concurrent clients**
 4. **Add image preprocessing** (resize, crop, filters)
 5. **Integrate with web applications** using JavaScript WebSocket API
+6. **Add negative prompt updates** using `prepare()` method
+7. **Create a web UI** for prompt editing
 
 ## Comparison with Screen Example
 
