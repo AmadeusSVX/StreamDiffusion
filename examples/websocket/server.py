@@ -131,9 +131,9 @@ async def handle_client(websocket):
 
                     output_image = stream(image=image_tensor)
 
-                    # Convert output image to base64
+                    # Convert output image to base64 (JPEG format by default)
                     output_buffer = BytesIO()
-                    output_image.save(output_buffer, format="PNG")
+                    output_image.save(output_buffer, format="JPEG", quality=85)
                     output_base64 = base64.b64encode(output_buffer.getvalue()).decode('utf-8')
 
                     # Send processed image back

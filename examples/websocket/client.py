@@ -132,7 +132,7 @@ def main():
     default_image = os.path.join(
         os.path.dirname(__file__), "..", "..", "images", "inputs", "input.png"
     )
-    default_prompt = "1girl with brown dog hair, thick glasses, smiling"
+    default_prompt = "1 girl with brown short hair and horns, thick glasses, smiling"
 
     # Parse command line arguments
     if len(sys.argv) < 2:
