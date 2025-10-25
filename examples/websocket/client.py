@@ -13,16 +13,27 @@ from PIL import Image
 import os
 
 
-async def send_image_for_processing(image_path, prompt):
-    """Send image and prompt to server for img2img processing."""
+async def send_image_for_processing(image_path, prompt, use_binary=False):
+    """Send image and prompt to server for img2img processing.
+
+    Args:
+        image_path: Path to the image file
+        prompt: Text prompt for img2img generation
+        use_binary: If True, use binary protocol (no BASE64 encoding)
+    """
     uri = "ws://localhost:8765"
 
-    if len(sys.argv) > 3:
-        uri = sys.argv[3]
+    # Check for custom URI
+    for arg in sys.argv[3:]:
+        if arg.startswith("ws://") or arg.startswith("wss://"):
+            uri = arg
+            break
 
+    protocol_type = "Binary" if use_binary else "BASE64"
     print(f"\n{'='*50}")
     print(f"Img2Img WebSocket Client")
     print(f"{'='*50}")
+    print(f"Protocol: {protocol_type}")
     print(f"Server: {uri}")
     print(f"Image: {image_path}")
     print(f"Prompt: {prompt}")
@@ -39,61 +50,132 @@ async def send_image_for_processing(image_path, prompt):
             welcome_data = json.loads(welcome)
             print(f"   Server: {welcome_data.get('message')}")
 
-            # Load and encode image
+            # Load image
             print(f"\n2. Loading image...")
             with Image.open(image_path) as img:
                 # Convert to RGB if necessary
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                # Encode image to base64
+                # Save to buffer
                 buffer = BytesIO()
-                img.save(buffer, format="PNG")
-                image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                print(f"   ✓ Image loaded and encoded")
+                img.save(buffer, format="JPEG" if use_binary else "PNG", quality=90)
+                buffer.seek(0)
 
-            # Send img2img request
-            request = {
-                "type": "img2img",
-                "image": image_base64,
-                "prompt": prompt,
-                "timestamp": time.time()
-            }
+                if use_binary:
+                    # Binary protocol - no BASE64 encoding
+                    image_bytes = buffer.getvalue()
+                    print(f"   ✓ Image loaded ({len(image_bytes)} bytes)")
+                else:
+                    # Legacy BASE64 protocol
+                    image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                    print(f"   ✓ Image loaded and encoded (BASE64: {len(image_base64)} chars)")
 
-            print(f"\n3. Sending image for processing...")
-            await websocket.send(json.dumps(request))
-            print(f"   ✓ Request sent")
+            if use_binary:
+                # Binary protocol: Send metadata first, then binary data
+                metadata = {
+                    "type": "img2img_binary",
+                    "prompt": prompt,
+                    "format": "jpeg",
+                    "timestamp": time.time()
+                }
+
+                print(f"\n3. Sending metadata...")
+                await websocket.send(json.dumps(metadata))
+                print(f"   ✓ Metadata sent")
+
+                print(f"\n4. Sending binary image data...")
+                await websocket.send(image_bytes)
+                print(f"   ✓ Binary image sent ({len(image_bytes)} bytes)")
+
+            else:
+                # Legacy protocol: Send everything as JSON with BASE64
+                request = {
+                    "type": "img2img",
+                    "image": image_base64,
+                    "prompt": prompt,
+                    "timestamp": time.time()
+                }
+
+                print(f"\n3. Sending image for processing...")
+                await websocket.send(json.dumps(request))
+                print(f"   ✓ Request sent (BASE64 encoded)")
 
             # Wait for response
-            print(f"\n4. Waiting for processed image...")
+            step = 5 if use_binary else 4
+            print(f"\n{step}. Waiting for processed image...")
             try:
-                response = await asyncio.wait_for(websocket.recv(), timeout=60.0)
-                response_data = json.loads(response)
+                if use_binary:
+                    # Binary protocol: Receive metadata first, then binary data
+                    response_metadata = await asyncio.wait_for(websocket.recv(), timeout=60.0)
+                    metadata_data = json.loads(response_metadata)
 
-                if response_data.get("type") == "img2img_result":
-                    print(f"   ✓ Processed image received")
+                    if metadata_data.get("type") == "img2img_result_binary":
+                        print(f"   ✓ Metadata received")
 
-                    # Decode and display image
-                    image_data = response_data.get("image")
-                    if image_data:
-                        # Decode base64 image
-                        image_bytes = base64.b64decode(image_data)
-                        output_image = Image.open(BytesIO(image_bytes))
+                        # Receive binary image data
+                        response_image = await asyncio.wait_for(websocket.recv(), timeout=10.0)
 
-                        # Save and display
-                        output_path = "output_client2.png"
-                        output_image.save(output_path)
-                        print(f"   ✓ Image saved to {output_path}")
+                        if isinstance(response_image, bytes):
+                            print(f"   ✓ Binary image received ({len(response_image)} bytes)")
 
-                        # Display image
-                        print(f"\n5. Displaying result...")
-                        output_image.show()
-                        print(f"   ✓ Image window opened")
+                            # Load image from binary data
+                            output_image = Image.open(BytesIO(response_image))
 
+                            # Save and display
+                            output_path = "output_client_binary.jpg"
+                            output_image.save(output_path)
+                            print(f"   ✓ Image saved to {output_path}")
+
+                            # Display image
+                            print(f"\n{step + 1}. Displaying result...")
+                            output_image.show()
+                            print(f"   ✓ Image window opened")
+
+                            # Show efficiency stats
+                            print(f"\n{'='*50}")
+                            print(f"Efficiency Stats (Binary Protocol):")
+                            print(f"  Sent: {len(image_bytes)} bytes")
+                            print(f"  Received: {len(response_image)} bytes")
+                            print(f"  No BASE64 overhead (saved ~33% bandwidth)")
+                        else:
+                            print(f"   ✗ Expected binary data, got text")
                     else:
-                        print(f"   ✗ No image data in response")
+                        print(f"   ✗ Unexpected response type: {metadata_data.get('type')}")
+
                 else:
-                    print(f"   ✗ Unexpected response type: {response_data.get('type')}")
+                    # Legacy protocol: Receive JSON with BASE64
+                    response = await asyncio.wait_for(websocket.recv(), timeout=60.0)
+                    response_data = json.loads(response)
+
+                    if response_data.get("type") == "img2img_result":
+                        print(f"   ✓ Processed image received")
+
+                        # Decode and display image
+                        image_data = response_data.get("image")
+                        if image_data:
+                            # Decode base64 image
+                            image_bytes = base64.b64decode(image_data)
+                            output_image = Image.open(BytesIO(image_bytes))
+
+                            # Save and display
+                            output_path = "output_client_base64.jpg"
+                            output_image.save(output_path)
+                            print(f"   ✓ Image saved to {output_path}")
+
+                            # Display image
+                            print(f"\n5. Displaying result...")
+                            output_image.show()
+                            print(f"   ✓ Image window opened")
+
+                            print(f"\n{'='*50}")
+                            print(f"Stats (BASE64 Protocol):")
+                            print(f"  BASE64 size sent: {len(image_base64)} chars")
+                            print(f"  BASE64 size received: {len(image_data)} chars")
+                        else:
+                            print(f"   ✗ No image data in response")
+                    else:
+                        print(f"   ✗ Unexpected response type: {response_data.get('type')}")
 
             except asyncio.TimeoutError:
                 print(f"   ✗ Timeout waiting for response (60s)")
@@ -134,23 +216,31 @@ def main():
     )
     default_prompt = "1 girl with brown short hair and horns, thick glasses, smiling"
 
+    # Check for --binary flag
+    use_binary = "--binary" in sys.argv
+
+    # Remove flags from argv for easier parsing
+    args = [arg for arg in sys.argv if not arg.startswith("--")]
+
     # Parse command line arguments
-    if len(sys.argv) < 2:
+    if len(args) < 2:
         print("\nUsage:")
-        print("  python client2.py <image_path> [prompt] [ws://host:port]")
+        print("  python client.py <image_path> [prompt] [ws://host:port]")
+        print("\nOptions:")
+        print("  --binary    Use binary protocol (no BASE64 encoding)")
         print("\nExamples:")
-        print(f'  python client2.py "{default_image}"')
-        print(f'  python client2.py image.png "a beautiful landscape"')
-        print(f'  python client2.py image.png "cyberpunk city" ws://localhost:8765')
+        print(f'  python client.py "{default_image}"')
+        print(f'  python client.py --binary image.png "a beautiful landscape"')
+        print(f'  python client.py image.png "cyberpunk city" ws://localhost:8765')
         print("\nUsing default values for demo...")
         image_path = default_image
         prompt = default_prompt
     else:
-        image_path = sys.argv[1]
-        prompt = sys.argv[2] if len(sys.argv) > 2 else default_prompt
+        image_path = args[1]
+        prompt = args[2] if len(args) > 2 else default_prompt
 
     # Run the client
-    result = asyncio.run(send_image_for_processing(image_path, prompt))
+    result = asyncio.run(send_image_for_processing(image_path, prompt, use_binary))
 
     if result:
         sys.exit(0)

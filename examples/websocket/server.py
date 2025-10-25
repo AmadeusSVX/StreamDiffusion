@@ -60,6 +60,9 @@ async def handle_client(websocket):
     """Handle a client connection."""
     logger.info(f"Client connected from: {websocket.remote_address}")
 
+    # Store pending binary metadata for next binary frame
+    pending_binary_metadata = None
+
     try:
         # Send welcome message (exactly like test_server.py)
         await websocket.send(json.dumps({
@@ -71,48 +74,24 @@ async def handle_client(websocket):
 
         # Handle messages
         async for message in websocket:
-            logger.debug(f"Received message")
+            # Check if message is binary or text
+            if isinstance(message, bytes):
+                # Binary frame - this should be image data following metadata
+                logger.debug(f"Received binary message ({len(message)} bytes)")
 
-            try:
-                data = json.loads(message)
-                message_type = data.get("type")
-                logger.info(f"Received message type: {message_type}")
+                if pending_binary_metadata is None:
+                    logger.error("Received binary data without metadata")
+                    continue
 
-                if message_type == "register":
-                    # Client registration (like in test_server.py)
-                    client_type = data.get("client_type", "producer")
-                    logger.info(f"Client registered as: {client_type}")
+                try:
+                    # Process binary image directly
+                    prompt = pending_binary_metadata.get("prompt", "1girl with brown dog hair, thick glasses, smiling")
+                    image_format = pending_binary_metadata.get("format", "jpeg")
 
-                    # Send confirmation
-                    await websocket.send(json.dumps({
-                        "type": "registered",
-                        "client_type": client_type,
-                        "timestamp": time.time()
-                    }))
-                    logger.debug("Sent registration confirmation")
+                    logger.info(f"Processing binary img2img with prompt: {prompt}")
 
-                elif message_type == "ping":
-                    # Respond to ping (like in test_server.py)
-                    await websocket.send(json.dumps({
-                        "type": "pong",
-                        "timestamp": time.time()
-                    }))
-                    logger.debug("Sent pong")
-
-                elif message_type == "img2img":
-                    # Process img2img request
-                    image_data = data.get("image")
-                    prompt = data.get("prompt", "1girl with brown dog hair, thick glasses, smiling")
-
-                    if not image_data:
-                        logger.error("No image data received")
-                        continue
-
-                    logger.info(f"Processing img2img with prompt: {prompt}")
-
-                    # Decode base64 image
-                    image_bytes = base64.b64decode(image_data)
-                    input_image = Image.open(BytesIO(image_bytes))
+                    # Decode image from binary data
+                    input_image = Image.open(BytesIO(message))
 
                     # Prepare stream with prompt
                     stream.prepare(
@@ -131,30 +110,122 @@ async def handle_client(websocket):
 
                     output_image = stream(image=image_tensor)
 
-                    # Convert output image to base64 (JPEG format by default)
-                    output_buffer = BytesIO()
-                    output_image.save(output_buffer, format="JPEG", quality=85)
-                    output_base64 = base64.b64encode(output_buffer.getvalue()).decode('utf-8')
-
-                    # Send processed image back
+                    # Send metadata first
                     await websocket.send(json.dumps({
-                        "type": "img2img_result",
-                        "image": output_base64,
+                        "type": "img2img_result_binary",
                         "prompt": prompt,
+                        "format": "jpeg",
                         "timestamp": time.time()
                     }))
 
-                    logger.info("Sent processed image back to client")
+                    # Convert output image to binary (JPEG format by default)
+                    output_buffer = BytesIO()
+                    output_image.save(output_buffer, format="JPEG", quality=85)
+                    output_buffer.seek(0)
 
-                else:
-                    logger.warning(f"Unknown message type: {message_type}")
+                    # Send binary image data
+                    await websocket.send(output_buffer.getvalue())
 
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON received: {e}")
-            except Exception as e:
-                logger.error(f"Error handling message: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
+                    logger.info("Sent processed image as binary")
+
+                    # Clear pending metadata
+                    pending_binary_metadata = None
+
+                except Exception as e:
+                    logger.error(f"Error processing binary image: {e}")
+                    pending_binary_metadata = None
+
+            else:
+                # Text frame - JSON message
+                logger.debug(f"Received text message")
+
+                try:
+                    data = json.loads(message)
+                    message_type = data.get("type")
+                    logger.info(f"Received message type: {message_type}")
+
+                    if message_type == "img2img_binary":
+                        # Store metadata for next binary frame
+                        pending_binary_metadata = data
+                        logger.debug("Stored metadata for incoming binary image")
+
+                    elif message_type == "register":
+                        # Client registration (like in test_server.py)
+                        client_type = data.get("client_type", "producer")
+                        logger.info(f"Client registered as: {client_type}")
+
+                        # Send confirmation
+                        await websocket.send(json.dumps({
+                            "type": "registered",
+                            "client_type": client_type,
+                            "timestamp": time.time()
+                        }))
+                        logger.debug("Sent registration confirmation")
+
+                    elif message_type == "ping":
+                        # Respond to ping (like in test_server.py)
+                        await websocket.send(json.dumps({
+                            "type": "pong",
+                            "timestamp": time.time()
+                        }))
+                        logger.debug("Sent pong")
+
+                    elif message_type == "img2img":
+                        # Process img2img request (backward compatibility)
+                        image_data = data.get("image")
+                        prompt = data.get("prompt", "1girl with brown dog hair, thick glasses, smiling")
+
+                        if not image_data:
+                            logger.error("No image data received")
+                            continue
+
+                        logger.info(f"Processing img2img with prompt: {prompt}")
+
+                        # Decode base64 image
+                        image_bytes = base64.b64decode(image_data)
+                        input_image = Image.open(BytesIO(image_bytes))
+
+                        # Prepare stream with prompt
+                        stream.prepare(
+                            prompt=prompt,
+                            negative_prompt="low quality, bad quality, blurry, low resolution",
+                            num_inference_steps=50,
+                            guidance_scale=1.2,
+                            delta=0.5,
+                        )
+
+                        # Process image using exact same method from single.py
+                        image_tensor = stream.preprocess_image(input_image)
+
+                        for _ in range(stream.batch_size - 1):
+                            stream(image=image_tensor)
+
+                        output_image = stream(image=image_tensor)
+
+                        # Convert output image to base64 (JPEG format by default)
+                        output_buffer = BytesIO()
+                        output_image.save(output_buffer, format="JPEG", quality=85)
+                        output_base64 = base64.b64encode(output_buffer.getvalue()).decode('utf-8')
+
+                        # Send processed image back
+                        await websocket.send(json.dumps({
+                            "type": "img2img_result",
+                            "image": output_base64,
+                            "prompt": prompt,
+                            "timestamp": time.time()
+                        }))
+
+                        logger.info("Sent processed image back to client")
+
+                    else:
+                        logger.warning(f"Unknown message type: {message_type}")
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON received: {e}")
+                except Exception as e:
+                    logger.error(f"Error handling message: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
     except websockets.exceptions.ConnectionClosed:
         logger.info(f"Client disconnected normally: {websocket.remote_address}")
